@@ -1,0 +1,19 @@
+# Loot / scan results
+loot/
+*.pcap
+*.json
+!config.example.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# MVT output
+mvt_output/
+
+# Secrets
+config.json
+*.key
