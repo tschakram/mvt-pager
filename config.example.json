@@ -1,0 +1,13 @@
+{
+  "mvt_pager": {
+    "adb_wait_timeout": 90,
+    "scan_timeout_quick": 300,
+    "scan_timeout_full": 900
+  },
+  "loot": {
+    "base_dir": "/root/loot/mvt_pager",
+    "reports_dir": "/root/loot/mvt_pager/reports",
+    "cyt_export": "/root/loot/mvt_pager/cyt_mvt_reports.json"
+  },
+  "notes": "Copy to config.json on the Pager and adjust paths if needed."
+}
