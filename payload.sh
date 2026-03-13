@@ -15,12 +15,26 @@ export LD_LIBRARY_PATH="/mmc/usr/lib:/mmc/lib:${LD_LIBRARY_PATH:-}"
 LOOT_DIR="/root/loot/mvt_pager"
 REPORT_DIR="$LOOT_DIR/reports"
 PYTHON_DIR="/root/payloads/user/reconnaissance/mvt-pager/python"
+CONFIG_FILE="/root/payloads/user/reconnaissance/mvt-pager/config.json"
 ADB_WAIT_TIMEOUT=90
+VT_API_KEY=""
 
 # ============================================================
 # SETUP
 # ============================================================
 mkdir -p "$LOOT_DIR" "$REPORT_DIR"
+
+# VT API Key aus config.json laden (gitignored — OPSEC-sicher)
+if [ -f "$CONFIG_FILE" ]; then
+    VT_API_KEY=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$CONFIG_FILE'))
+    print(d.get('virustotal', {}).get('api_key', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+fi
 
 LOG "=============================="
 LOG "    MVT on Pager  v1.1"
@@ -90,6 +104,12 @@ LOG "    Settings, Properties"
 LOG ""
 LOG "2 = Full-Scan   (~10-15 min)"
 LOG "    Alle Module + IOC-Check"
+LOG ""
+if [ -n "$VT_API_KEY" ]; then
+    LOG green "☁  VirusTotal: aktiv"
+else
+    LOG yellow "☁  VirusTotal: kein Key"
+fi
 LOG ""
 sleep 3
 
@@ -223,11 +243,16 @@ LOG ""
 LED blue blink
 SPINNER_ID=$(START_SPINNER "MVT Scan läuft...")
 
+VT_MAX=15
+[ "$SCAN_MODE" -eq 2 ] && VT_MAX=40
+
 SCAN_OUTPUT=$(python3 "$PYTHON_DIR/adb_scan.py" \
     --serial "$DEVICE_SERIAL" \
     --output "$SCAN_DIR" \
     --mode "$SCAN_MODE" \
-    $([ "$USE_IOC" = true ] && echo "--iocs") 2>&1)
+    --vt-max "$VT_MAX" \
+    $([ "$USE_IOC" = true ]  && echo "--iocs") \
+    $([ -n "$VT_API_KEY" ]   && echo "--vt-key $VT_API_KEY") 2>&1)
 SCAN_EXIT=$?
 
 STOP_SPINNER "$SPINNER_ID"
@@ -237,6 +262,7 @@ DETECTIONS=$(echo "$SCAN_OUTPUT" | grep "^DETECTIONS:" | cut -d: -f2)
 PACKAGES=$(echo "$SCAN_OUTPUT" | grep "^PACKAGES:" | cut -d: -f2)
 PROCESSES=$(echo "$SCAN_OUTPUT" | grep "^PROCESSES:" | cut -d: -f2)
 IOC_HITS=$(echo "$SCAN_OUTPUT" | grep "^IOC_HITS:" | cut -d: -f2)
+VT_HITS=$(echo "$SCAN_OUTPUT" | grep "^VT_HITS:" | cut -d: -f2)
 SCAN_ERROR=$(echo "$SCAN_OUTPUT" | grep "^ERROR:" | cut -d: -f2-)
 
 # ============================================================
@@ -262,9 +288,10 @@ LOG "📦 Pakete:       ${PACKAGES:-?}"
 LOG "⚙  Prozesse:     ${PROCESSES:-?}"
 LOG "🔍 Detektionen:  ${DETECTIONS:-0}"
 [ "$USE_IOC" = true ] && LOG "☣  IOC Treffer:  ${IOC_HITS:-0}"
+[ -n "$VT_API_KEY" ]  && LOG "☁  VT Treffer:   ${VT_HITS:-0}"
 LOG ""
 
-if [ "${DETECTIONS:-0}" -gt 0 ] || [ "${IOC_HITS:-0}" -gt 0 ]; then
+if [ "${DETECTIONS:-0}" -gt 0 ] || [ "${IOC_HITS:-0}" -gt 0 ] || [ "${VT_HITS:-0}" -gt 0 ]; then
     LED red blink
     LOG red "🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨"
     LOG red "   SPYWARE-HINWEIS!"
@@ -286,6 +313,50 @@ fi
 LOG ""
 LOG "Report: $SCAN_DIR"
 LOG ""
+
+# ============================================================
+# DOWNLOADS LÖSCHEN
+# ============================================================
+LOG ""
+LOG blue "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+LOG blue "   Downloads bereinigen"
+LOG blue "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+LOG ""
+LOG "Alle Dateien in /sdcard/Download"
+LOG "und /sdcard/Downloads löschen?"
+LOG ""
+LOG yellow "⚠ Diese Aktion ist permanent!"
+LOG ""
+
+CONFIRMATION_DIALOG "Downloads auf Gerät löschen?"
+if [ $? -eq 0 ]; then
+    LED yellow blink
+    SPINNER_ID=$(START_SPINNER "Downloads löschen...")
+
+    # Dateien zählen bevor Löschen
+    DEL_COUNT=$(adb -s "$DEVICE_SERIAL" shell \
+        'ls /sdcard/Download/ 2>/dev/null | wc -l; ls /sdcard/Downloads/ 2>/dev/null | wc -l' \
+        | awk '{s+=$1} END{print s}' 2>/dev/null)
+
+    # Löschen (beide Pfade — Gerät-abhängig)
+    adb -s "$DEVICE_SERIAL" shell \
+        'rm -rf /sdcard/Download/* /sdcard/Download/.* /sdcard/Downloads/* /sdcard/Downloads/.* 2>/dev/null; echo DONE' \
+        >/dev/null 2>&1
+
+    STOP_SPINNER "$SPINNER_ID"
+    LED cyan solid
+
+    LOG ""
+    LOG green "✓ Downloads gelöscht"
+    LOG "  ${DEL_COUNT:-?} Dateien entfernt"
+    LOG ""
+    sleep 2
+else
+    LOG ""
+    LOG yellow "  Downloads nicht gelöscht."
+    LOG ""
+    sleep 1
+fi
 
 # ============================================================
 # CYT EXPORT

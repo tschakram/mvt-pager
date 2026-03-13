@@ -25,6 +25,9 @@ import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 # ── Known spyware / stalkerware package names (public IOC data) ──────────────
@@ -260,6 +263,89 @@ def check_sideloaded(packages):
     return detections
 
 
+def check_vt_hashes(serial, packages, output_dir, api_key, max_checks=20):
+    """Check APK SHA-256 hashes against VirusTotal API v3.
+
+    Free tier limit: 4 requests/min → 16 s sleep between calls.
+    Only 3rd-party APKs are checked (skips /system/ and /vendor/).
+    """
+    if not api_key:
+        return []
+
+    detections = []
+    vt_results = []
+
+    # Filter: only non-system packages with a known APK path
+    third_party = [
+        p for p in packages
+        if p.get("apk") and not p["apk"].startswith(("/system/", "/vendor/", "/apex/"))
+    ]
+
+    for pkg in third_party[:max_checks]:
+        apk_path = pkg["apk"]
+        pkg_name = pkg.get("name", apk_path)
+
+        # Get SHA-256 hash via adb shell (Android has sha256sum or sha256)
+        raw = adb(serial, "shell", f"sha256sum '{apk_path}' 2>/dev/null || sha256 '{apk_path}' 2>/dev/null", timeout=30)
+        if not raw:
+            continue
+        parts = raw.split()
+        sha256 = parts[0].strip().lower() if parts else ""
+        if len(sha256) != 64:
+            continue
+
+        # Query VirusTotal
+        url = f"https://www.virustotal.com/api/v3/files/{sha256}"
+        req = urllib.request.Request(url, headers={"x-apikey": api_key, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+
+            stats = (data.get("data") or {}).get("attributes", {}).get("last_analysis_stats", {})
+            malicious  = int(stats.get("malicious",  0))
+            suspicious = int(stats.get("suspicious", 0))
+            total      = sum(stats.values()) if stats else 0
+
+            vt_results.append({
+                "package":    pkg_name,
+                "sha256":     sha256,
+                "malicious":  malicious,
+                "suspicious": suspicious,
+                "total_engines": total,
+            })
+
+            if malicious > 0 or suspicious > 2:
+                detections.append({
+                    "type":      "virustotal",
+                    "value":     pkg_name,
+                    "label":     f"VT {malicious}/{total} malicious",
+                    "indicator": (
+                        f"[VirusTotal] {pkg_name} — "
+                        f"{malicious} AV-Engines positiv, {suspicious} verdächtig"
+                    ),
+                })
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                pass   # Hash not yet in VT — not necessarily malicious
+            elif e.code == 429:
+                # Rate-limit hit: wait a full minute and retry once
+                time.sleep(61)
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = json.loads(resp.read())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Respect free-tier rate limit (4 req / 60 s)
+        time.sleep(16)
+
+    _save_json(output_dir, "vt_results.json", vt_results)
+    return detections
+
+
 def _save_json(output_dir, filename, data):
     """Save data as JSON to output directory."""
     if not output_dir:
@@ -275,10 +361,14 @@ def _save_json(output_dir, filename, data):
 
 def main():
     parser = argparse.ArgumentParser(description="ADB Scanner (MVT replacement)")
-    parser.add_argument("--serial", default=None)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--mode", type=int, default=1, choices=[1, 2])
-    parser.add_argument("--iocs", action="store_true")
+    parser.add_argument("--serial",  default=None)
+    parser.add_argument("--output",  required=True)
+    parser.add_argument("--mode",    type=int, default=1, choices=[1, 2])
+    parser.add_argument("--iocs",    action="store_true")
+    parser.add_argument("--vt-key",  default="", dest="vt_key",
+                        help="VirusTotal API key (free tier)")
+    parser.add_argument("--vt-max",  type=int, default=15, dest="vt_max",
+                        help="Max APKs to check against VT (default 15 quick, 40 full)")
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -302,6 +392,13 @@ def main():
     side_det = check_sideloaded(packages)
     all_detections += side_det
 
+    # VirusTotal hash check (optional, requires API key)
+    vt_det = []
+    if args.vt_key:
+        vt_max = args.vt_max if args.vt_max else (15 if args.mode == 1 else 40)
+        vt_det = check_vt_hashes(args.serial, packages, args.output, args.vt_key, vt_max)
+        all_detections += vt_det
+
     # Save summary
     summary = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -317,7 +414,8 @@ def main():
     print(f"PACKAGES:{len(packages)}")
     print(f"PROCESSES:{len(processes)}")
     print(f"DETECTIONS:{len(all_detections)}")
-    print(f"IOC_HITS:{len(all_detections)}")
+    print(f"IOC_HITS:{len(all_detections) - len(vt_det)}")
+    print(f"VT_HITS:{len(vt_det)}")
     for det in all_detections:
         print(f"INDICATOR:{det['indicator']}")
 

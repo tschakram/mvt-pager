@@ -9,5 +9,9 @@
     "reports_dir": "/root/loot/mvt_pager/reports",
     "cyt_export": "/root/loot/mvt_pager/cyt_mvt_reports.json"
   },
-  "notes": "Copy to config.json on the Pager and adjust paths if needed."
+  "virustotal": {
+    "api_key": "",
+    "notes": "Free tier: 4 req/min, 500 req/day. Get key at https://www.virustotal.com/gui/my-apikey"
+  },
+  "notes": "Copy to config.json on the Pager and adjust paths if needed. config.json is gitignored (OPSEC)."
 }
